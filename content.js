@@ -3,6 +3,7 @@
 
     const processed  = new WeakSet();
     const dataRCache = new WeakSet();
+    const isDebug = location.search.includes('ad-cleaner-debug');
 
     const SAFE_TAGS = new Set([
         'BODY', 'HTML', 'MAIN', 'HEADER',
@@ -48,7 +49,7 @@
         if (el.offsetHeight < 10) return;
 
         processed.add(el);
-        console.log('[AdCleaner]', reason, el);
+        if (isDebug) console.log('[AdCleaner]', reason, el);
         el.remove();
     }
 
@@ -121,7 +122,7 @@
         if (attempts > 8) {
             if (!isTooLarge(containerEl) && !isSafe(containerEl)) {
                 processed.add(containerEl);
-                console.log('[AdCleaner] shadow-forced', containerEl);
+                if (isDebug) console.log('[AdCleaner] shadow-forced', containerEl);
                 containerEl.remove();
             }
             return;
@@ -225,6 +226,6 @@
 
     processNode(document.body);
 
-    console.log('[AdCleaner] started on', location.hostname);
+    if (isDebug) console.log('[AdCleaner] started on', location.hostname);
 
 })();
