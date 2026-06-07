@@ -2,30 +2,24 @@
     'use strict';
 
     const processed  = new WeakSet();
-    const dataRCache = new WeakSet(); // кэш элементов с data-r-*
-    const isDebug = location.search.includes('ym-cleaner-debug=1');
+    const dataRCache = new WeakSet();
 
     const SAFE_TAGS = new Set([
         'BODY', 'HTML', 'MAIN', 'HEADER',
         'FOOTER', 'ARTICLE', 'SECTION', 'NAV',
     ]);
 
-    // ── Helpers ──────────────────────────────────────────────────────────────
-
     function isSafe(el) {
         return !el || SAFE_TAGS.has(el.tagName);
     }
 
     function isTooLarge(el) {
-        // Блокируем только если большой по ОБЕИМ осям одновременно
-        // (правая колонка может быть высокой, но узкой — это нормально)
         return (
             el.offsetWidth  > window.innerWidth  * 0.7 &&
             el.offsetHeight > window.innerHeight * 0.7
         );
     }
 
-    // Проверка с кэшем, без повторного перебора атрибутов
     function hasDataR(el) {
         if (dataRCache.has(el)) return true;
         const found = [...el.attributes].some(a =>
@@ -36,53 +30,43 @@
         return found;
     }
 
-    // querySelector быстрее чем [...querySelectorAll('*')].some()
     function subtreeHasDataR(el) {
-        return (
-            el.querySelector('[data-r-i-],[data-r-a-]') !== null ||
-            // атрибутный селектор без значения — ищем сам элемент тоже
-            hasDataR(el)
-        );
+        if (hasDataR(el)) return true;
+        for (const child of el.querySelectorAll('*')) {
+            if (hasDataR(child)) return true;
+        }
+        return false;
     }
 
-    // ── Удаление ─────────────────────────────────────────────────────────────
-
     function remove(el, reason) {
-        if (!el)                    return;
-        if (!el.isConnected)        return; // защита от detached
-        if (processed.has(el))      return;
-        if (isSafe(el))             return;
-        if (isTooLarge(el))         return;
-        if (el.offsetWidth  < 10)   return;
-        if (el.offsetHeight < 10)   return;
+        if (!el)                  return;
+        if (!el.isConnected)      return;
+        if (processed.has(el))    return;
+        if (isSafe(el))           return;
+        if (isTooLarge(el))       return;
+        if (el.offsetWidth  < 10) return;
+        if (el.offsetHeight < 10) return;
 
         processed.add(el);
-        if (isDebug) console.log('[AdCleaner]', reason, el);
+        console.log('[AdCleaner]', reason, el);
         el.remove();
     }
 
-    // ── Поиск контейнера ──────────────────────────────────────────────────────
-
-    // Ищем минимальный родитель, который содержит оба якоря: MARKER и data-r-*
     function findContainer(startEl, maxSteps = 12) {
-
         let candidate = null;
         let cur = startEl;
 
         for (let i = 0; i < maxSteps && cur && !isSafe(cur); i++) {
-
             if (isTooLarge(cur)) break;
 
             const hasMarker = cur.querySelector('[data-id="MARKER"]') !== null;
             const hasR      = subtreeHasDataR(cur);
 
-            // Идеальный контейнер — оба якоря рядом
             if (hasMarker && hasR) {
                 candidate = cur;
                 break;
             }
 
-            // Запасной: один якорь + минимальный видимый размер
             if (
                 (hasMarker || hasR) &&
                 cur.offsetWidth  > 80 &&
@@ -98,72 +82,111 @@
         return candidate;
     }
 
-    // Для shadow-closed блоков (Кинопоиск):
-    // ищем родителя с "Отключить рекламу" или именованный id-контейнер
     function findShadowContainer(dataREl, maxSteps = 8) {
-
-        let cur = dataREl.parentElement;
+        let best = null;
+        let cur  = dataREl.parentElement;
 
         for (let i = 0; i < maxSteps && cur && !isSafe(cur); i++) {
-
             if (isTooLarge(cur)) break;
 
             if (cur.textContent.includes('Отключить рекламу')) {
-                return cur;
+                return { el: cur, deferred: false };
             }
 
-            if (
-                cur.id &&
-                subtreeHasDataR(cur) &&
-                cur.offsetWidth  > 80 &&
-                cur.offsetHeight > 40
-            ) {
-                return cur;
+            const display = getComputedStyle(cur).display;
+            const isBlock = (
+                display === 'block'        ||
+                display === 'flex'         ||
+                display === 'grid'         ||
+                display === 'inline-block' ||
+                display === 'inline-flex'
+            );
+
+            if (isBlock) {
+                best = cur;
+                if (cur.offsetWidth > 50) break;
             }
 
             cur = cur.parentElement;
         }
 
-        return null;
+        if (!best) return null;
+        return { el: best, deferred: best.offsetHeight < 10 };
     }
 
-    // ── Обработка одного узла ─────────────────────────────────────────────────
+    function retryRemove(containerEl, attempts = 0) {
+        if (processed.has(containerEl)) return;
+        if (!containerEl.isConnected)   return;
+
+        if (attempts > 8) {
+            if (!isTooLarge(containerEl) && !isSafe(containerEl)) {
+                processed.add(containerEl);
+                console.log('[AdCleaner] shadow-forced', containerEl);
+                containerEl.remove();
+            }
+            return;
+        }
+
+        const w = containerEl.offsetWidth;
+        const h = containerEl.offsetHeight;
+
+        if (w > 10 && h > 10 && !isTooLarge(containerEl)) {
+            remove(containerEl, 'shadow-deferred');
+            return;
+        }
+
+        setTimeout(
+            () => retryRemove(containerEl, attempts + 1),
+            100 * Math.pow(1.8, attempts)
+        );
+    }
+
+    // ── Обработка одного data-r-* или MARKER узла ─────────────────────────────
+
+    function handleAdNode(node) {
+        if (processed.has(node)) return;
+
+        const container = findContainer(node);
+        if (container) {
+            remove(container, 'data-r');
+            return;
+        }
+
+        const result = findShadowContainer(node);
+        if (!result) return;
+
+        if (!result.deferred) {
+            remove(result.el, 'shadow-closed');
+        } else {
+            retryRemove(result.el);
+        }
+    }
+
+    function handleMarker(marker) {
+        if (processed.has(marker)) return;
+        const container = findContainer(marker);
+        if (container) remove(container, 'MARKER');
+    }
+
+    // ── Полный скан поддерева ─────────────────────────────────────────────────
 
     function processNode(el) {
+        el.querySelectorAll('[data-id="MARKER"]').forEach(handleMarker);
+        if (el.dataset?.id === 'MARKER') handleMarker(el);
 
-        // MARKER
-        el.querySelectorAll('[data-id="MARKER"]').forEach(marker => {
-            if (processed.has(marker)) return;
-            const container = findContainer(marker);
-            if (container) remove(container, 'MARKER');
-        });
-
-        // data-r-*
         el.querySelectorAll('*').forEach(node => {
-            if (!hasDataR(node))       return;
-            if (processed.has(node))   return;
-
-            const container = findContainer(node);
-            if (container) {
-                remove(container, 'data-r container');
-                return;
-            }
-
-            const shadowContainer = findShadowContainer(node);
-            if (shadowContainer) {
-                remove(shadowContainer, 'shadow-closed');
-            }
+            if (hasDataR(node)) handleAdNode(node);
         });
+        if (hasDataR(el)) handleAdNode(el);
     }
 
-    // ── Дебаунс + MutationObserver ────────────────────────────────────────────
+    // ── MutationObserver — два режима ─────────────────────────────────────────
 
-    let debounceTimer = null;
+    let debounceTimer  = null;
     const pendingNodes = new Set();
 
-    function scheduleProcess(nodes) {
-        for (const n of nodes) pendingNodes.add(n);
-
+    function scheduleProcess(node) {
+        pendingNodes.add(node);
         clearTimeout(debounceTimer);
         debounceTimer = setTimeout(() => {
             const snapshot = [...pendingNodes];
@@ -171,28 +194,37 @@
             for (const n of snapshot) {
                 if (n.isConnected) processNode(n);
             }
-        }, 150); // 150 мс — баланс между скоростью и нагрузкой
+        }, 200);
     }
 
-    // ── Запуск ────────────────────────────────────────────────────────────────
-
-    // Первый скан — весь document.body
-    processNode(document.body);
-
-    // Следующие сканы — только новые узлы
     new MutationObserver(mutations => {
-        const added = [];
         for (const m of mutations) {
-            for (const n of m.addedNodes) {
-                if (n.nodeType === Node.ELEMENT_NODE) added.push(n);
+            for (const node of m.addedNodes) {
+                if (node.nodeType !== Node.ELEMENT_NODE) continue;
+
+                // Быстрый путь: сам узел — рекламный маркер → без дебаунса
+                if (hasDataR(node)) {
+                    handleAdNode(node);
+                    continue;
+                }
+                if (node.dataset?.id === 'MARKER') {
+                    handleMarker(node);
+                    continue;
+                }
+
+                // Медленный путь: внутри может быть реклама → дебаунс
+                scheduleProcess(node);
             }
         }
-        if (added.length) scheduleProcess(added);
     }).observe(document.body, {
         childList: true,
         subtree:   true,
     });
 
-    if (isDebug) console.log('[AdCleaner] started on', location.hostname);
+    // ── Первый скан ───────────────────────────────────────────────────────────
+
+    processNode(document.body);
+
+    console.log('[AdCleaner] started on', location.hostname);
 
 })();
